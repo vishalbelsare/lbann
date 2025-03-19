@@ -95,6 +95,7 @@
 #include "lbann/layers/transform/tessellate.hpp"
 #include "lbann/layers/transform/uniform.hpp"
 #include "lbann/layers/transform/unpooling.hpp"
+#include "lbann/layers/transform/upsample.hpp"
 #include "lbann/layers/transform/weighted_sum.hpp"
 #include "lbann/layers/transform/weights.hpp"
 
@@ -134,6 +135,7 @@
 #include "lbann/data_ingestion/readers/data_reader_mnist.hpp"
 #include "lbann/data_ingestion/readers/data_reader_nci.hpp"
 #include "lbann/data_ingestion/readers/data_reader_python.hpp"
+#include "lbann/data_ingestion/readers/data_reader_python_dataset.hpp"
 #include "lbann/data_ingestion/readers/data_reader_synthetic.hpp"
 #ifdef LBANN_HAS_OPENCV
 #include "lbann/data_ingestion/readers/data_reader_imagenet.hpp"
@@ -217,7 +219,9 @@
 #include "lbann/objective_functions/weight_regularization/l2.hpp"
 
 /// Metrics
+#include "lbann/metrics/executable_metric.hpp"
 #include "lbann/metrics/layer_metric.hpp"
+#include "lbann/metrics/python_metric.hpp"
 
 /// Utilities, exceptions, library interface, etc.
 #include "lbann/io/file_io.hpp"

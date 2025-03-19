@@ -32,6 +32,12 @@
 
 namespace lbann {
 
+/** @brief A metric that receives its value from the output of a given layer.
+ *
+ *  The layer name, provided as ``layer``, will be used as the evaluated metric
+ *  source. If ``unit`` is given and set to "%", the value will be multiplied
+ *  by 100.
+ */
 class layer_metric : public metric
 {
 
@@ -75,13 +81,6 @@ public:
 protected:
   void setup(model& m) override;
   EvalType evaluate(execution_mode mode, int mini_batch_size) override;
-
-  /** Computation to evaluate the metric function (deprecated).
-   *  This function is not called since the 'evaluate' function is
-   *  overridden.
-   */
-  EvalType evaluate_compute(const AbsDistMat& prediction,
-                            const AbsDistMat& ground_truth) override;
 
 private:
   /** Descriptive name for metric. */

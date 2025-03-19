@@ -10,7 +10,25 @@ import numpy as np
 import lbann.contrib.args
 import lbann.contrib.launcher
 from lbann.core.util import get_parallel_strategy_args
+import lbann.util.data
 import os
+from cosmoflow_dataset import CosmoFlowDataset
+
+def create_python_dataset_reader(args):
+    """Create a python dataset reader for CosmoFlow."""
+
+    readers = []
+    for role in ['train', 'val', 'test']:
+        role_dir = getattr(args, f'{role}_dir')
+        if not role_dir:
+            continue
+        if role == 'val':
+            role = 'validate'
+        dataset = CosmoFlowDataset(role_dir, args.input_width, args.num_secrets)
+        reader = lbann.util.data.construct_python_dataset_reader(dataset, role=role)
+        readers.append(reader)
+
+    return lbann.reader_pb2.DataReader(reader=readers)
 
 def create_cosmoflow_data_reader(
         train_path, val_path, test_path, num_responses):
@@ -21,11 +39,13 @@ def create_cosmoflow_data_reader(
         num_responses (int): The number of parameters to predict.
     """
 
-    reader_args = [
-        {"role": "train", "data_filename": train_path},
-        {"role": "validate", "data_filename": val_path},
-        # {"role": "test", "data_filename": test_path},
-    ]
+    reader_args = []
+    if train_path:
+        reader_args.append({"role": "train", "data_filename": train_path})
+    if val_path:
+        reader_args.append({"role": "validate", "data_filename": val_path})
+    if test_path:
+        reader_args.append({"role": "test", "data_filename": test_path})
 
     for reader_arg in reader_args:
         reader_arg["data_file_pattern"] = "{}/*.hdf5".format(
@@ -128,17 +148,38 @@ if __name__ == "__main__":
         default_dir = '{}/{}'.format(default_lc_dataset, role)
         parser.add_argument(
             '--{}-dir'.format(role), action='store', type=str,
-            default=default_dir,
+            default=default_dir if role == 'train' else None,
             help='the directory of the {} dataset'.format(role))
     parser.add_argument(
         '--synthetic', action='store_true',
         help='Use synthetic data')
+    parser.add_argument(
+        '--python-dataset', action='store_true',
+        help='Use python dataset reader')
     parser.add_argument(
         '--no-datastore', action='store_true',
         help='Disable the data store')
     parser.add_argument(
         '--transform-input', action='store_true',
         help='Apply log1p transformation to model inputs')
+    parser.add_argument(
+        '--dropout-keep-prob', action='store', type=float, default=0.5,
+        help='Probability of keeping activations in dropout layers (default: 0.5). Set to 1 to disable dropout')
+    parser.add_argument(
+        '--cosine-schedule', action='store_true',
+        help='Use cosine learning rate scheduler')
+    parser.add_argument(
+        '--lr-min', action='store', type=float, default=0.,
+        help='Minimum leaning rate for cosine scheduler')
+    parser.add_argument(
+        '--decay-steps', action='store', type=int, default=50000,
+        help='Steps to decay learning rate over for cosine scheduler')
+    parser.add_argument(
+        '--init-warmup-lr', action='store', type=float, default=0.,
+        help='Initial warmup learning rate for cosine scheduler')
+    parser.add_argument(
+        '--warmup-steps', action='store', type=int, default=1000,
+        help='Number of steps to warmup learnign rate over with cosine scheduler')
 
     # Parallelism arguments
     parser.add_argument(
@@ -200,6 +241,15 @@ if __name__ == "__main__":
             channel_groups=args.channel_groups,
             filter_groups=args.filter_groups,
             depth_groups=args.depth_groups)
+        
+    cosine_scheduler_args = None
+    if args.cosine_schedule:
+        cosine_scheduler_args = {
+            'lr_min': args.lr_min,
+            'decay_steps': args.decay_steps,
+            'init_warmup_lr': args.init_warmup_lr,
+            'warmup_steps': args.warmup_steps
+        }
 
     model = cosmoflow_model.construct_cosmoflow_model(parallel_strategy=parallel_strategy,
                                                       local_batchnorm=args.local_batchnorm,
@@ -210,32 +260,37 @@ if __name__ == "__main__":
                                                       learning_rate=args.optimizer_learning_rate,
                                                       min_distconv_width=args.min_distconv_width,
                                                       mlperf=args.mlperf,
-                                                      transform_input=args.transform_input)
+                                                      transform_input=args.transform_input,
+                                                      dropout_keep_prob=args.dropout_keep_prob,
+                                                      cosine_schedule=cosine_scheduler_args)
 
     # Add profiling callbacks if needed.
     model.callbacks.extend(lbann.contrib.args.create_profile_callbacks(args))
 
     # Setup optimizer
     optimizer = lbann.contrib.args.create_optimizer(args)
-    # optimizer.learn_rate *= 1e-2
 
     # Setup data reader
+    serialize_io = False
     if args.synthetic:
         data_reader = create_synthetic_data_reader(
             args.input_width, args.num_secrets)
+    elif args.python_dataset:
+        data_reader = create_python_dataset_reader(args)
     else:
         data_reader = create_cosmoflow_data_reader(
             args.train_dir,
             args.val_dir,
             args.test_dir,
             num_responses=args.num_secrets)
+        serialize_io = True
 
     # Setup trainer
     random_seed_arg = {'random_seed': args.random_seed} \
         if args.random_seed is not None else {}
     trainer = lbann.Trainer(
         mini_batch_size=args.mini_batch_size,
-        serialize_io=True,
+        serialize_io=serialize_io,
         **random_seed_arg)
 
     # Runtime parameters/arguments
@@ -253,7 +308,7 @@ if __name__ == "__main__":
         environment['DISTCONV_JIT_CACHEPATH'] = f'{application_path}/DaCe_kernels/.dacecache'
 
     if args.synthetic or args.no_datastore:
-        lbann_args = []
+        lbann_args = ['--num_io_threads=8']
     else:
         lbann_args = ['--use_data_store']
     lbann_args += lbann.contrib.args.get_profile_args(args)

@@ -39,6 +39,7 @@ set_full_path(THIS_DIR_SOURCES
   hadamard.cpp
   identity_zero.cpp
   in_top_k.cpp
+  multidim_reduction.cpp
   pooling.cpp
   reduction.cpp
   reshape.cpp
@@ -51,6 +52,7 @@ set_full_path(THIS_DIR_SOURCES
   tessellate.cpp
   uniform.cpp
   unpooling.cpp
+  upsample.cpp
   weighted_sum.cpp
   weights.cpp
 )

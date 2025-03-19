@@ -40,6 +40,7 @@ fi
 SPACK_INSTALL_DEPENDENCIES_ONLY=
 # List of packages to install at the root level with LBANN
 SPACK_EXTRA_ROOT_PACKAGES=
+EXTRA_NINJA_FLAGS=
 
 CONFIG_FILE_NAME=
 
@@ -53,6 +54,8 @@ ALUMINUM_VER="@master"
 DIHYDROGEN_VER="@develop"
 # Default variants for Conduit to minimize dependencies
 CONDUIT_VARIANTS="~hdf5_compat~fortran~parmetis"
+# User specified location for externals built with the superbuild
+LBANN_SUPERBUILD_EXTERNAL_DIR=""
 
 ################################################################
 # Help message
@@ -97,6 +100,7 @@ Options:
   ${C}--tmp-build-dir${N}            Put the build directory in tmp space
   ${C}--spec-only${N}                Stop after a spack spec command
   ${C}-s | --stable${N}              Use the latest stable defaults not the head of Hydrogen, DiHydrogen and Aluminum repos
+  ${C}--superbuild-prefix${N}        Use the latest stable defaults not the head of Hydrogen, DiHydrogen and Aluminum repos
   ${C}--hydrogen-repo <PATH>${N}     Use a local repository for the Hydrogen library
   ${C}--dihydrogen-repo <PATH>${N}   Use a local repository for the DiHydrogen library
   ${C}--aluminum-repo <PATH>${N}     Use a local repository for the Aluminum library
@@ -120,7 +124,7 @@ while :; do
         --ci)
             # We want all compilation errors
             LBANN_WARNINGS_AS_ERRORS="TRUE"
-            EXTRA_NINJA_FLAGS="-k 0"
+            EXTRA_NINJA_FLAGS="${EXTRA_NINJA_FLAGS} -k 0"
             ;;
         --ci-pip)
             PIP_EXTRAS="${PIP_EXTRAS} ${LBANN_HOME}/ci_test/requirements.txt"
@@ -174,6 +178,7 @@ while :; do
         -j|--build-jobs)
             if [ -n "${2}" ]; then
                 BUILD_JOBS="-j${2}"
+                EXTRA_NINJA_FLAGS="${EXTRA_NINJA_FLAGS} -j${2}"
                 shift
             else
                 echo "\"${1}\" option requires a non-empty option argument" >&2
@@ -230,6 +235,15 @@ while :; do
             HYDROGEN_VER=
             ALUMINUM_VER="@1.0.0-lbann"
             DIHYDROGEN_VER=
+            ;;
+        --superbuild-prefix)
+            if [ -n "${2}" ]; then
+                LBANN_SUPERBUILD_EXTERNAL_DIR=${2}
+                shift
+            else
+                echo "\"${1}\" option requires a non-empty option argument" >&2
+                exit 1
+            fi
             ;;
         --hydrogen-repo)
             if [ -n "${2}" ]; then
@@ -354,6 +368,13 @@ fi
 # Detect system parameters
 CLUSTER=$(hostname | sed 's/\([a-zA-Z][a-zA-Z]*\)[0-9]*/\1/g')
 
+LOG="spack-build-${LBANN_ENV}.log"
+if [[ -f ${LOG} ]]; then
+    CMD="rm ${LOG}"
+    echo ${CMD}
+    [[ -z "${DRY_RUN:-}" ]] && ${CMD}
+fi
+
 # Identify the center that we are running at
 CENTER=
 # Customize the build based on the center
@@ -380,13 +401,6 @@ if [[ -n "${LBANN_LABEL:-}" ]]; then
     AT_LBANN_LABEL="@${LBANN_LABEL}"
 else
     AT_LBANN_LABEL=""
-fi
-
-LOG="spack-build-${LBANN_ENV}.log"
-if [[ -f ${LOG} ]]; then
-    CMD="rm ${LOG}"
-    echo ${CMD}
-    [[ -z "${DRY_RUN:-}" ]] && ${CMD}
 fi
 
 LBANN_BUILD_LABEL="lbann_${CLUSTER}_${LBANN_LABEL}"
@@ -492,6 +506,22 @@ if [[ "${LBANN_VARIANTS}" =~ (.*)(%[0-9a-zA-Z:\.@]+)(.*) ]]; then
     CENTER_COMPILER=${BASH_REMATCH[2]}
     LBANN_VARIANTS="${BASH_REMATCH[1]} ${BASH_REMATCH[3]}"
 fi
+
+# Here is a fairly brittle way to find the DiHydrogen, Hydrogen, and Aluminum superbuilds
+LBANN_SUPERBUILD_EXTERNAL_DHA_DIR="dha"
+if [[ "${LBANN_VARIANTS}" =~ .*"+distconv".* ]]; then
+    # If the user didn't supply a specific version of Hydrogen on the command line add one
+    LBANN_SUPERBUILD_EXTERNAL_DHA_DIR="${LBANN_SUPERBUILD_EXTERNAL_DHA_DIR}_with_distconv"
+fi
+if [[ "${LBANN_VARIANTS}" =~ .*"+half".* ]]; then
+    # If the user didn't supply a specific version of Hydrogen on the command line add one
+    LBANN_SUPERBUILD_EXTERNAL_DHA_DIR="${LBANN_SUPERBUILD_EXTERNAL_DHA_DIR}_with_half"
+fi
+if [[ "${LBANN_VARIANTS}" =~ .*"+nvshmem".* ]]; then
+    # If the user didn't supply a specific version of Hydrogen on the command line add one
+    LBANN_SUPERBUILD_EXTERNAL_DHA_DIR="${LBANN_SUPERBUILD_EXTERNAL_DHA_DIR}_with_nvshmem"
+fi
+
 
 if [[ "${CENTER_COMPILER}" =~ .*"%clang".* ]]; then
     # If the compiler is clang use the LLD fast linker
@@ -775,7 +805,7 @@ if [[ -z "${CONFIG_FILE_NAME}" ]]; then
 
         # See if there are any center-specific externals
         SPACK_ENV_YAML_FILE="${SPACK_ROOT}/var/spack/environments/${LBANN_ENV}/spack.yaml"
-        CMD="set_center_specific_externals ${CENTER} ${SPACK_ARCH_TARGET} ${SPACK_ARCH} ${SPACK_ENV_YAML_FILE} ${LBANN_MODFILES_DIR}"
+        CMD="set_center_specific_externals ${CENTER} ${SPACK_ARCH_TARGET} ${SPACK_ARCH} ${SPACK_ENV_YAML_FILE} ${LBANN_MODFILES_DIR} ${LBANN_SUPERBUILD_EXTERNAL_DIR} ${LBANN_SUPERBUILD_EXTERNAL_DHA_DIR}"
         echo ${CMD} | tee -a ${LOG}
         [[ -z "${DRY_RUN:-}" ]] && { ${CMD} || exit_on_failure "${CMD}"; }
 
@@ -1064,7 +1094,10 @@ export PATH=\${PATH}:\${LBANN_CMAKE_DIR}:\${LBANN_NINJA_DIR}:\${LBANN_PYTHON_DIR
 export PYTHONPATH=\${LBANN_PYTHONPATH}:\${PYTHONPATH}
 EOF
 
+BUILD_MODULES=
         if [[ -n "${MODULE_CMD}" ]]; then
+            BUILD_MODULES=${MODULE_CMD//module load /}
+            BUILD_MODULES=${BUILD_MODULES// /;}
             cat >> ${LBANN_SETUP_FILE}<<EOF
 # Modules loaded during this installation
 ${MODULE_CMD}
@@ -1075,7 +1108,7 @@ EOF
         # Build a list of modules that LBANN should load
         LBANN_WRITE_DEPENDENT_MODULEPATH="${LBANN_MODFILES_DIR}/Core"
         LBANN_DEPENDENT_MODULES=$(spack-python $SCRIPTS_DIR/find_externals_and_lbann_top_level_dependencies.py)
-
+#        LBANN_DEPENDENT_MODULES="${BUILD_MODULES};${LBANN_DEPENDENT_MODULES}"
         if [[ "${CENTER_COMPILER}" =~ .*"%clang".* ]]; then
             # If the compiler is clang use the LLD fast linker
             CENTER_LINKER_FLAGS="+lld"
@@ -1119,7 +1152,7 @@ EOF
             echo "I have found and will use ${MATCHED_CONFIG_FILE}"
             CONFIG_FILE_NAME=${MATCHED_CONFIG_FILE}
             if [[ ! -e "${LBANN_BUILD_PARENT_DIR}/${CONFIG_FILE_NAME}" ]]; then
-                echo "Overwritting exising CMake config file in ${LBANN_BUILD_PARENT_DIR}/${CONFIG_FILE_NAME}"
+                echo "Overwriting exising CMake config file in ${LBANN_BUILD_PARENT_DIR}/${CONFIG_FILE_NAME}"
             fi
             # Save the config file in the build directory
             CMD="mv ${MATCHED_CONFIG_FILE_PATH} ${LBANN_BUILD_PARENT_DIR}/${CONFIG_FILE_NAME}"

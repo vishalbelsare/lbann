@@ -467,6 +467,34 @@ void model::serialize_to_onnx(onnx::ModelProto& mp)
 }
 #endif // LBANN_HAS_ONNX
 
+bool model::is_layer_needed_for_backprop(const Layer* l) const
+{
+  // First, check parents. If one of the parent layers require gradients,
+  // this layer does too.
+  for (int i = 0; i < l->get_num_parents(); ++i) {
+    if (m_needed_for_backprop.find(&l->get_parent_layer(i)) !=
+        m_needed_for_backprop.end()) {
+      return true;
+    }
+  }
+
+  // Second, check the layer itself. If frozen, backprop is not necessary.
+  if (l->is_frozen()) {
+    return false;
+  }
+
+  // Otherwise, check weight optimizers. If one of the associated optimizers
+  // is not nullptr, then backprop will be necessary.
+  for (size_t i = 0; i < l->num_weights(); ++i) {
+    if (l->get_weights(i).get_optimizer() != nullptr) {
+      return true;
+    }
+  }
+
+  // Not needed for backprop
+  return false;
+}
+
 // =============================================
 // Model specification
 // =============================================
@@ -921,54 +949,62 @@ void model::setup_subcommunicators(const std::vector<El::Grid*>& fngrids)
   // Because of this optimization we cannot have dynamic number of sub-graph in
   // a model For example: In a model, module1 cannnot different number of
   // sub-graphs than module2
-  std::string one_index = "1";
+  std::string const one_index = "1";
 
   const auto& layers = this->get_layers();
   const El::Int num_layers = layers.size();
 
   for (El::Int node = 0; node < num_layers; ++node) {
-    if ((layers[node]->get_type() == "slice" ||
-         layers[node]->get_type() == "split" ||
-         layers[node]->get_type() == "concatenate" ||
-         layers[node]->get_type() == "sum") &&
-        layers[node]->subgraph_parallelism_execution()) {
+    Layer* const layer = layers[node];
+    std::string const& layer_type = layer->get_type();
+    if ((layer_type == "slice" || layer_type == "split" ||
+         layer_type == "concatenate" || layer_type == "sum") &&
+        layer->subgraph_parallelism_execution()) {
       if (subCommunicatorsSubgrids.find(one_index) !=
           subCommunicatorsSubgrids.end()) {
-        layers[node]->reset_inter_subgrid_vc_comm(
-          subCommunicatorsSubgrids[one_index]);
+        layer->reset_inter_subgrid_vc_comm(subCommunicatorsSubgrids[one_index]);
       }
       else {
         subCommunicatorsSubgrids[one_index] = std::make_shared<El::mpi::Comm>();
-        const auto& childs = layers[node]->get_child_layers();
+        const auto& childs = layer->get_child_layers();
 
         int indexSubgrid = -1;
-        for (int child = 0; child < layers[node]->get_num_children(); ++child) {
-          if (fngrids[childs[child]->get_grid_tag()]->InGrid())
-
-          {
+        for (int child = 0; child < layer->get_num_children(); ++child) {
+          if (fngrids.at(childs[child]->get_grid_tag())->InGrid()) {
             indexSubgrid = child;
           }
         }
 
         const int child_tag = childs[indexSubgrid]->get_grid_tag();
-        const int layer_tag = layers[node]->get_grid_tag();
+        const int layer_tag = layer->get_grid_tag();
+
+        if (child_tag < 0)
+          LBANN_ERROR("child_tag=",
+                      child_tag,
+                      " (child=",
+                      childs[indexSubgrid]->get_name(),
+                      ")");
+        if (layer_tag < 0)
+          LBANN_ERROR("layer_tag=",
+                      layer_tag,
+                      " (layer=",
+                      layer->get_name(),
+                      ")");
 
         const int posInSubGrid = fngrids[child_tag]->VCRank();
         const int posInGrid = fngrids[layer_tag]->ViewingRank();
-        El::mpi::Split(layers[node]->get_comm()->get_trainer_comm(),
+        El::mpi::Split(layer->get_comm()->get_trainer_comm(),
                        posInSubGrid,
                        posInGrid,
                        *subCommunicatorsSubgrids[one_index]);
 
-        layers[node]->reset_inter_subgrid_vc_comm(
-          subCommunicatorsSubgrids[one_index]);
+        layer->reset_inter_subgrid_vc_comm(subCommunicatorsSubgrids[one_index]);
       }
     }
 
-    if (layers[node]->get_type() == "cross_grid_sum" ||
-        layers[node]->get_type() == "cross_grid_sum_slice") {
-      layers[node]->reset_inter_subgrid_vc_comm(
-        subCommunicatorsSubgrids[one_index]);
+    if (layer_type == "cross_grid_sum" ||
+        layer_type == "cross_grid_sum_slice") {
+      layer->reset_inter_subgrid_vc_comm(subCommunicatorsSubgrids[one_index]);
     }
   }
 }
@@ -1004,27 +1040,39 @@ void model::setup_layer_execution_order()
 
 void model::setup_layer_grid_tags(const std::vector<El::Grid*>& fngrids)
 {
-  for (auto& layer : this->get_layers()) {
-    // Choose process grid to distribute matrices over
+  // This is "subgraph" code. The logic is (now) as follows:
+  //
+  // If a layer tag is -1, then we check its parents. If they are all
+  // the same, set to parent value. If any is different, set to 0.
+  // (Note that if we're doing "layer parallelism", they should all be
+  // -1 and this definition will recover that.)
+  bool doing_subgraph_stuff = false;
+  auto const layers = this->get_layers();
+  for (auto& layer : layers) {
+    if (layer->get_grid_tag() > 0) {
+      doing_subgraph_stuff = true;
+      break;
+    }
+  }
+  if (!doing_subgraph_stuff)
+    return;
+
+  for (auto& layer : layers) {
     int tag = layer->get_grid_tag();
     if (tag < 0) {
-      // Use tag from parent layers if they are all the same. Otherwise
-      // use tag 0.
+      tag = 0; // now it's at least valid if there are no parents
       for (int i = 0; i < layer->get_num_parents(); ++i) {
-        auto parent_tag = layer->get_parent_layer(i).get_grid_tag();
+        auto const parent_tag = layer->get_parent_layer(i).get_grid_tag();
         if (i == 0) {
           tag = parent_tag;
         }
-        if (tag != parent_tag) {
-          tag = -1;
+        else if (tag != parent_tag) {
+          tag = 0;
           break;
         }
       }
-      if (tag < 0) {
-        tag = 0;
-      }
     }
-    if (tag < 0 || tag >= static_cast<int>(fngrids.size())) {
+    if (tag >= static_cast<int>(fngrids.size())) {
       LBANN_ERROR("attempted to initialize ",
                   layer->get_type(),
                   " layer \"",
@@ -1303,14 +1351,15 @@ void model::add_split_layers(std::unordered_set<std::string>& layer_names)
                       l.get_data_layout(),
                       l.get_device_allocation());
 
-#define PROTO_DEVICE_LAYOUT(T_datatype, T_layout, T_device)                              \
-      if (args == args_tuple(std::type_index(typeid(T_datatype)), T_layout, T_device)) { \
-        split.reset(new split_layer<T_datatype, T_layout, T_device>(m_comm));            \
-      }
+#define PROTO_DEVICE_LAYOUT(T_datatype, T_layout, T_device)                    \
+  if (args ==                                                                  \
+      args_tuple(std::type_index(typeid(T_datatype)), T_layout, T_device)) {   \
+    split.reset(new split_layer<T_datatype, T_layout, T_device>(m_comm));      \
+  }
 
-#define PROTO_DEVICE(T_datatype, T_device)                                    \
-      PROTO_DEVICE_LAYOUT(T_datatype, data_layout::DATA_PARALLEL, T_device);  \
-      PROTO_DEVICE_LAYOUT(T_datatype, data_layout::MODEL_PARALLEL, T_device);
+#define PROTO_DEVICE(T_datatype, T_device)                                     \
+  PROTO_DEVICE_LAYOUT(T_datatype, data_layout::DATA_PARALLEL, T_device);       \
+  PROTO_DEVICE_LAYOUT(T_datatype, data_layout::MODEL_PARALLEL, T_device);
 
 #include "lbann/macros/instantiate_device.hpp"
 #undef PROTO_DEVICE_LAYOUT
@@ -1333,10 +1382,13 @@ void model::add_split_layers(std::unordered_set<std::string>& layer_names)
       split->set_name(name);
       layer_names.insert(name);
 
-      // Copy parallel strategy from parent.
+      // Copy parallel strategy and grid tag from parent.
       ParallelStrategy& ps = split->get_parallel_strategy();
       ParallelStrategy& orig_ps = l.get_parallel_strategy();
       ps = orig_ps;
+      if (l.grid_tag() >= 0) {
+        split->grid_tag(l.grid_tag());
+      }
 
       // Setup relationships between split layer and child layers
       for (int j = 0; j < l.get_num_children(); ++j) {
@@ -1555,22 +1607,28 @@ void model::clear_gradients()
   }
 }
 
-void model::forward_prop(execution_mode mode)
+void model::forward_prop(execution_mode mode, bool skip_callbacks)
 {
   LBANN_CALIPER_MARK_FUNCTION;
-  do_model_forward_prop_begin_cbs(mode);
+  if (!skip_callbacks)
+    do_model_forward_prop_begin_cbs(mode);
 
   // Clear activations in reference counter
   m_activation_refcnt.clear();
+
+  // Clear layers that will be required in backpropagation
+  m_needed_for_backprop.clear();
 
   for (El::Int i = 0; i < get_num_layers(); ++i) {
     auto& l = get_layer(i);
 
     if (this->is_subgraph_parallelism_enabled()) {
-      if (l.get_run_layer_in_subgraph() || l.get_name() == "layer1") {
-        do_layer_forward_prop_begin_cbs(mode, &l);
+      if (l.get_run_layer_in_subgraph()) {
+        if (!skip_callbacks)
+          do_layer_forward_prop_begin_cbs(mode, &l);
         l.forward_prop();
-        do_layer_forward_prop_end_cbs(mode, &l);
+        if (!skip_callbacks)
+          do_layer_forward_prop_end_cbs(mode, &l);
       }
       else {
         // To Do: Fix last batch problem in sub-graph parallelism
@@ -1578,15 +1636,21 @@ void model::forward_prop(execution_mode mode)
       }
     }
     else {
-      do_layer_forward_prop_begin_cbs(mode, &l);
+      if (!skip_callbacks)
+        do_layer_forward_prop_begin_cbs(mode, &l);
       l.forward_prop();
-      do_layer_forward_prop_end_cbs(mode, &l);
+      if (!skip_callbacks)
+        do_layer_forward_prop_end_cbs(mode, &l);
     }
+
+    if (is_layer_needed_for_backprop(&l))
+      m_needed_for_backprop.insert(&l);
   }
-  do_model_forward_prop_end_cbs(mode);
+  if (!skip_callbacks)
+    do_model_forward_prop_end_cbs(mode);
 }
 
-void model::backward_prop(bool compute_weight_grads_only)
+void model::backward_prop(bool compute_weight_grads_only, bool skip_callbacks)
 {
   LBANN_CALIPER_MARK_FUNCTION;
 
@@ -1596,14 +1660,27 @@ void model::backward_prop(bool compute_weight_grads_only)
   bool const envvar_disable_layers =
     !arg_parser.get<bool>(LBANN_OPTION_NO_BACKPROP_DISABLE);
 
-  do_model_backward_prop_begin_cbs();
+  if (!skip_callbacks)
+    do_model_backward_prop_begin_cbs();
 
   for (El::Int i = get_num_layers() - 1; i >= 0; --i) {
 
     // Perform backward prop step on current layer
     auto& l = get_layer(i);
-    bool enable_layer = (!envvar_disable_layers ||
-                         disabled_layers.find(&l) == disabled_layers.end());
+
+    // Check if layer should be skipped
+    bool enable_layer = true;
+    if (envvar_disable_layers) {
+      // Based on backpropagation requirements
+      if (disabled_layers.find(&l) != disabled_layers.end())
+        enable_layer = false;
+
+      // Based on gradient/optimizer requirements
+      if (compute_weight_grads_only && m_needed_for_backprop.size() > 0 &&
+          m_needed_for_backprop.find(&l) == m_needed_for_backprop.end()) {
+        enable_layer = false;
+      }
+    }
 
     // Check if all children skip gradient backpropagation
     if (enable_layer && envvar_disable_layers) {
@@ -1626,10 +1703,12 @@ void model::backward_prop(bool compute_weight_grads_only)
 
     if (this->is_subgraph_parallelism_enabled()) {
       if (l.get_run_layer_in_subgraph()) {
-        do_layer_backward_prop_begin_cbs(&l);
+        if (!skip_callbacks)
+          do_layer_backward_prop_begin_cbs(&l);
         if (enable_layer)
           l.back_prop();
-        do_layer_backward_prop_end_cbs(&l);
+        if (!skip_callbacks)
+          do_layer_backward_prop_end_cbs(&l);
       }
       else {
         // To Do: Fix last batch problem in sub-graph parallelism
@@ -1637,10 +1716,12 @@ void model::backward_prop(bool compute_weight_grads_only)
       }
     }
     else {
-      do_layer_backward_prop_begin_cbs(&l);
+      if (!skip_callbacks)
+        do_layer_backward_prop_begin_cbs(&l);
       if (enable_layer)
         l.back_prop();
-      do_layer_backward_prop_end_cbs(&l);
+      if (!skip_callbacks)
+        do_layer_backward_prop_end_cbs(&l);
     }
 
     // Terminate early if all gradients have been computed
@@ -1665,7 +1746,8 @@ void model::backward_prop(bool compute_weight_grads_only)
     }
   }
 
-  do_model_backward_prop_end_cbs();
+  if (!skip_callbacks)
+    do_model_backward_prop_end_cbs();
 }
 
 void model::update_weights()
@@ -1716,25 +1798,27 @@ void model::update_weights()
       ++m_amp_cur_skipped_steps;
       // Keep scale factor to the smallest positive normalized value for
       // floats. Even when EvalType is double, we may cast to float.
-      m_amp_scale_factor = std::max(
-        static_cast<EvalType>(std::numeric_limits<float>::min()),
-        m_amp_scale_factor * m_amp_backoff_factor);
+      m_amp_scale_factor =
+        std::max(static_cast<EvalType>(std::numeric_limits<float>::min()),
+                 m_amp_scale_factor * m_amp_backoff_factor);
       // Warn if we've been skipping too many steps.
       // Check exact number to avoid printing repeatedly.
       if (m_amp_cur_skipped_steps == 10) {
-        LBANN_WARNING(
-          "AMP skipped ten steps in a row, your model may have issues with AMP");
+        LBANN_WARNING("AMP skipped ten steps in a row, your model may have "
+                      "issues with AMP");
       }
-    } else {
+    }
+    else {
       if (m_amp_cur_steps + 1 == m_amp_growth_interval) {
         m_amp_cur_steps = 0;
         m_amp_cur_skipped_steps = 0;
         // Prevent scale factor from overflowing to inf when cast to
         // float.
-        m_amp_scale_factor = std::min(
-          static_cast<EvalType>(std::numeric_limits<float>::max()),
-          m_amp_scale_factor * m_amp_growth_factor);
-      } else {
+        m_amp_scale_factor =
+          std::min(static_cast<EvalType>(std::numeric_limits<float>::max()),
+                   m_amp_scale_factor * m_amp_growth_factor);
+      }
+      else {
         ++m_amp_cur_steps;
       }
     }
@@ -1779,7 +1863,8 @@ void model::reconcile_weight_values()
 void model::enable_amp(EvalType init_scale_factor,
                        EvalType growth_factor,
                        EvalType backoff_factor,
-                       size_t growth_interval) {
+                       size_t growth_interval)
+{
   m_amp_enabled = true;
   m_amp_scale_factor = init_scale_factor;
   m_amp_growth_factor = growth_factor;

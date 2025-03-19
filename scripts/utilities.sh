@@ -17,6 +17,13 @@ osx_realpath() {
     [[ $1 = /* ]] && echo "$1" || echo "$PWD/${1#./}"
 }
 
+function host_basename() {
+    HOST=$(hostname)
+    HOST=${HOST//[[:digit:]]/}
+    HOST=${HOST//\-/}
+    echo ${HOST}
+}
+
 function normpath() {
   # Remove all /./ sequences.
   local path=${1//\/.\//\/}
@@ -35,7 +42,8 @@ function find_cmake_config_file() {
 
     HOST=$(hostname)
     HOST=${HOST//[[:digit:]]/}
-    HOST=${HOST//\-/}
+    HOST=$(echo $HOST | sed 's/\(.*\)-$/\1/')
+
     [[ -z "${SYS_TYPE}" ]] && SYS=${SPACK_ARCH} || SYS="${SYS_TYPE}"
 
     if [[ "${center_compiler}" =~ .*"%".*"@".* ]]; then

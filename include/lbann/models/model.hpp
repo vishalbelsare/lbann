@@ -343,6 +343,11 @@ private:
    */
   void setup_weights();
 
+  /** @brief Tests whether a layer would be needed to compute through during
+   *  backpropagation
+   */
+  bool is_layer_needed_for_backprop(const Layer* l) const;
+
   ///@}
   /** @name Subgraph parallelism implementation */
   ///@{
@@ -399,9 +404,10 @@ public:
   void reset_epoch_statistics(execution_mode mode);
 
   /** @brief Forward propagation step. */
-  void forward_prop(execution_mode mode);
+  void forward_prop(execution_mode mode, bool skip_callbacks = false);
   /** @brief Backward propagation step. */
-  void backward_prop(bool compute_weight_grads_only = true);
+  void backward_prop(bool compute_weight_grads_only = true,
+                     bool skip_callbacks = false);
   /** Evaluate any metrics in the model */
   void evaluate_metrics(execution_mode mode, uint64_t current_mini_batch_size);
   /** @brief Clear each optimizer's gradient.
@@ -559,6 +565,14 @@ private:
 
   /** @brief Current callbacks to process. */
   std::vector<std::shared_ptr<callback_base>> m_callbacks;
+
+  /** @brief A set of layers needed for backpropagation.
+   *  @details This set is populated by model::forward_prop and controls
+   *  which layers will be computed during backpropagation. If the
+   *  `NO_BACKPROP_DISABLE` option is enabled, this set will not change the
+   *  behavior of backpropagation.
+   */
+  std::unordered_set<const Layer*> m_needed_for_backprop;
 
   /** @brief Is the model setup
    *  @details Flag to indicate if the setup function has been called
@@ -792,10 +806,7 @@ model::set_current_mini_batch_size(uint64_t mini_batch_size) noexcept
   return;
 }
 
-inline bool model::is_amp_enabled() const noexcept
-{
-  return m_amp_enabled;
-}
+inline bool model::is_amp_enabled() const noexcept { return m_amp_enabled; }
 
 inline EvalType model::get_amp_scale_factor() const noexcept
 {

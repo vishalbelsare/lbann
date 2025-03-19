@@ -23,8 +23,8 @@
 // implied. See the License for the specific language governing
 // permissions and limitations under the license.
 ////////////////////////////////////////////////////////////////////////////////
-#ifndef SRC_LAYERS_TRANSFORM_TENSOR_DIMS_UTILS_HPP_INCLUDED
-#define SRC_LAYERS_TRANSFORM_TENSOR_DIMS_UTILS_HPP_INCLUDED
+#ifndef LBANN_UTILS_TENSOR_DIMS_UTILS_HPP_INCLUDED
+#define LBANN_UTILS_TENSOR_DIMS_UTILS_HPP_INCLUDED
 
 #include "lbann/utils/exception.hpp"
 
@@ -48,6 +48,9 @@ public:
   NamedVector() = default;
   explicit NamedVector(std::vector<T> const& v) : m_data{v} {}
   explicit NamedVector(std::vector<T>&& v) : m_data{std::move(v)} {}
+  template <typename U>
+  explicit NamedVector(std::vector<U> const& v) : m_data(v.begin(), v.end())
+  {}
 
   NamedVector(NamedVector const& other) = default;
   NamedVector(NamedVector&& other) = default;
@@ -231,10 +234,12 @@ auto get_strides_as(ColMajorDims<DimT> const& dims)
   size_t const ndims = dim_vec.size();
 
   std::vector<StrideT> strides;
-  strides.reserve(ndims);
-  strides.push_back(StrideT{1});
-  for (size_t ii = 0UL; ii < ndims - 1; ++ii)
-    strides.push_back(strides[ii] * static_cast<StrideT>(dim_vec[ii]));
+  if (ndims > 0) {
+    strides.reserve(ndims);
+    strides.push_back(StrideT{1});
+    for (size_t ii = 0UL; ii < ndims - 1; ++ii)
+      strides.push_back(strides[ii] * static_cast<StrideT>(dim_vec[ii]));
+  }
   return ColMajorStrides<StrideT>(strides);
 }
 
@@ -352,4 +357,4 @@ auto permute_dims(ColMajorDims<IndexT> const& in, ColMajorPerm const& perm)
 ///@}
 
 } // namespace lbann
-#endif // SRC_LAYERS_TRANSFORM_TENSOR_DIMS_UTILS_HPP_INCLUDED
+#endif // LBANN_UTILS_TENSOR_DIMS_UTILS_HPP_INCLUDED

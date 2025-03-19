@@ -28,6 +28,7 @@
    :ref:`Hadamard`, "Entry-wise tensor product"
    :ref:`IdentityZero`, "Identity/zero function if layer is unfrozen/frozen."
    :ref:`InTopK`, "One-hot vector indicating top-k entries"
+   :ref:`MultiDimReduction`, "Reduce certain dimensions of a given tensor"
    :ref:`Pooling`, "Traverses the spatial dimensions of a data tensor
    with a sliding window and applies a reduction operation"
    :ref:`Reduction`, "Reduce tensor to scalar"
@@ -369,6 +370,41 @@ Arguments:
 ________________________________________
 
 
+.. _MultiDimReduction:
+
+----------------------------------------
+MultiDimReduction
+----------------------------------------
+
+The :python:`MultiDimReduction` layer reduces one or more dimensions in the
+given tensor. The reduction operation can be chosen separately.
+
+It expects one input tensor of order N, and an up to length N array of
+reduced axes [0..N-1], with respect to the input tensor
+dimensions (not including the mini-batch dimension). Therefore, passing 
+``axes=[0,1,2]`` for a rank-3 tensor will reduce the entire tensor into a
+scalar.
+
+Arguments:
+
+   :mode:
+
+      (``string``, optional) Reduction operation
+
+      Options: ``sum`` (default), ``product``, ``max``, or ``min``.
+      Only ``sum`` is currently supported for backpropagation.
+
+   :axes:
+
+      (``uint32``) Reduced tensor dimensions 
+
+      List of integers
+
+:ref:`Back to Top<transform-layers>`
+
+________________________________________
+
+
 .. _Pooling:
 
 ----------------------------------------
@@ -553,7 +589,7 @@ Slice
 
 The :python:`Slice` layer slices a tensor along a specified
 dimension. The tensor is split along one dimension at user-specified
-points, and each child layer recieves one piece.
+points, and each child layer receives one piece.
 
 Arguments:
 
@@ -629,7 +665,7 @@ propagation.
 The output is identical to the input, but the back propagation output
 (i.e. the error signal) is always zero. Compare with the stop_gradient
 operation in TensorFlow and Keras. Note that this means that computed
-gradients in preceeding layers are not exact gradients of the
+gradients in preceding layers are not exact gradients of the
 objective function.
 
 Arguments: None
